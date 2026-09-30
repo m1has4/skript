@@ -1,4 +1,3 @@
--- // PREMIUM MULTIHACK v5.0 — Admin Room + защита
 local SCRIPT_OK, SCRIPT_ERR = pcall(function()
 
 print("[1/11] Старт")
@@ -49,7 +48,7 @@ local function FB_DELETE(path)
 end
 
 -- ==========================================
--- РОЛИ И ADMIN SETTINGS
+-- РОЛИ
 -- ==========================================
 local Roles = {}
 local AdminSettings = {}
@@ -158,7 +157,7 @@ local ESPConfig = {
 }
 
 local AimbotConfig = {
-    FOV = 300,
+    FOV = 67,
     ShowFOV = true,
     Smoothness = 0.3,
     MaxDistance = 5000,
@@ -496,7 +495,7 @@ end
 print("[5/11] UI функции готовы")
 
 -- ==========================================
--- ESP (с учётом invisible)
+-- ESP
 -- ==========================================
 local function UpdateESPVisuals()
     for _, h in pairs(ESPObjects) do
@@ -534,7 +533,7 @@ local function CleanAllESP()
 end
 
 -- ==========================================
--- AIMBOT (с antiAim и invisible)
+-- AIMBOT
 -- ==========================================
 local function GetTargetHead(m)
     local armor = m:FindFirstChild("CharacterArmor")
