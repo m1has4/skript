@@ -1,0 +1,1029 @@
+-- // PREMIUM MULTIHACK v5.0 — Admin Room + защита
+local SCRIPT_OK, SCRIPT_ERR = pcall(function()
+
+print("[1/11] Старт")
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+print("[2/11] Services ок")
+
+local FIREBASE_URL = "https://database-rb-cs-default-rtdb.europe-west1.firebasedatabase.app"
+
+-- ==========================================
+-- FIREBASE
+-- ==========================================
+local function FB_GET(path)
+    local ok, res = pcall(function()
+        return request({ Url = FIREBASE_URL .. path .. ".json", Method = "GET" })
+    end)
+    if not ok or not res or not res.Body then return nil end
+    local ok2, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+    return ok2 and data or nil
+end
+
+local function FB_PUT(path, data)
+    local ok, res = pcall(function()
+        return request({
+            Url = FIREBASE_URL .. path .. ".json",
+            Method = "PUT",
+            Body = HttpService:JSONEncode(data),
+            Headers = { ["Content-Type"] = "application/json" }
+        })
+    end)
+    if ok and res then
+        if res.StatusCode == 200 then return true end
+        if res.StatusCode == 401 or res.StatusCode == 403 then return false, "403" end
+    end
+    return false, "net"
+end
+
+local function FB_DELETE(path)
+    pcall(function()
+        request({ Url = FIREBASE_URL .. path .. ".json", Method = "DELETE" })
+    end)
+end
+
+-- ==========================================
+-- РОЛИ И ADMIN SETTINGS
+-- ==========================================
+local Roles = {}
+local AdminSettings = {}
+local MyRole = "user"
+local MySettings = {}
+
+local RoleColors = {
+    admin = Color3.fromRGB(255, 60, 60),
+    tester = Color3.fromRGB(60, 220, 100),
+    user = Color3.fromRGB(180, 180, 180)
+}
+
+local function LoadRoles()
+    local data = FB_GET("/roles")
+    Roles = data or {}
+    MyRole = Roles[LocalPlayer.Name] or "user"
+end
+
+local function LoadAdminSettings()
+    local data = FB_GET("/adminSettings")
+    AdminSettings = data or {}
+    MySettings = AdminSettings[LocalPlayer.Name] or {}
+end
+
+local function IsHidden(nick, mode)
+    local s = AdminSettings[nick]
+    if not s then return false end
+    if mode == "esp" then return s.hideFromESP == true end
+    if mode == "aim" then return s.hideFromAimbot == true end
+    if mode == "online" then return s.hideFromOnline == true end
+    if mode == "scale" then return s.antiHeadScale == true end
+    if mode == "invis" then return s.invisible == true end
+    if mode == "antiAim" then return s.antiAim == true end
+    return false
+end
+
+LoadRoles()
+LoadAdminSettings()
+print("[3/11] Моя роль: " .. MyRole)
+
+-- ==========================================
+-- ОНЛАЙН
+-- ==========================================
+local myKey = tostring(LocalPlayer.UserId)
+
+local function RegisterSelf()
+    -- если скрыт от онлайна — пишем, но помечаем hidden (клиенты не показывают)
+    local hidden = MySettings.hideFromOnline == true
+    FB_PUT("/online/" .. myKey, {
+        name = LocalPlayer.Name,
+        role = MyRole,
+        hidden = hidden,
+        joined = os.time(),
+        lastSeen = os.time()
+    })
+end
+
+local function Heartbeat()
+    FB_PUT("/online/" .. myKey .. "/lastSeen", os.time())
+end
+
+local function Unregister()
+    FB_DELETE("/online/" .. myKey)
+end
+
+RegisterSelf()
+print("[4/11] Зарегистрирован")
+
+task.spawn(function()
+    while true do
+        task.wait(20)
+        Heartbeat()
+    end
+end)
+
+-- ==========================================
+-- СОСТОЯНИЕ
+-- ==========================================
+local MenuVisible = true
+local ESPEnabled = false
+local AimbotEnabled = false
+local HeadScaleEnabled = false
+local DeleteMapEnabled = false
+local BunnyHopEnabled = false
+local AntiSmokeEnabled = false
+local NoRecoilEnabled = false
+
+local Keybinds = {
+    ToggleMenu = Enum.KeyCode.Insert,
+    ToggleESP = Enum.KeyCode.F1,
+    ToggleAimbot = Enum.KeyCode.F2,
+    ToggleHeadScale = Enum.KeyCode.F7,
+    ToggleDeleteMap = Enum.KeyCode.F3,
+    ToggleBunnyHop = Enum.KeyCode.F4,
+    ToggleAntiSmoke = Enum.KeyCode.F5,
+    ToggleNoRecoil = Enum.KeyCode.F6
+}
+
+local SavedMapObject, SavedMapParent, SavedMapCFrame
+
+local ESPConfig = {
+    FillColor = Color3.fromRGB(255, 0, 85),
+    OutlineColor = Color3.fromRGB(255, 255, 255),
+    FillTransparency = 0.5,
+    OutlineTransparency = 0
+}
+
+local AimbotConfig = {
+    FOV = 300,
+    ShowFOV = true,
+    Smoothness = 0.3,
+    MaxDistance = 5000,
+    MoveMouse = true,
+    HoldMode = false,
+    HoldKey = Enum.UserInputType.MouseButton2,
+    AimMode = "aim"     -- "aim" или "anti" (отвод)
+}
+
+local HeadScaleConfig = {
+    Scale = 2.5,        -- во сколько раз увеличивать голову
+    MaxDistance = 3000,
+    FOV = 400,
+    RestoreOnDisable = true  -- восстанавливать оригинальный размер
+}
+
+local ESPObjects = {}
+local BunnyHopConnection = nil
+local HeadScaleOriginals = {}   -- [part] = originalSize
+
+local Theme = {
+    Background = Color3.fromRGB(20, 20, 25),
+    Topbar = Color3.fromRGB(15, 15, 18),
+    Accent = Color3.fromRGB(255, 0, 85),
+    Container = Color3.fromRGB(28, 28, 35),
+    Text = Color3.fromRGB(240, 240, 240),
+    TextDark = Color3.fromRGB(150, 150, 160),
+    ButtonOn = Color3.fromRGB(46, 204, 113),
+    ButtonOff = Color3.fromRGB(231, 76, 60)
+}
+
+-- ==========================================
+-- UI
+-- ==========================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "PremiumMenuGui"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 999
+local guiOk = pcall(function() ScreenGui.Parent = game:GetService("CoreGui") end)
+if not guiOk then ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+local FOVCircle = Instance.new("Frame")
+FOVCircle.AnchorPoint = Vector2.new(0.5, 0.5)
+FOVCircle.Position = UDim2.new(0.5, 0, 0.5, 0)
+FOVCircle.Size = UDim2.new(0, AimbotConfig.FOV * 2, 0, AimbotConfig.FOV * 2)
+FOVCircle.BackgroundTransparency = 1
+FOVCircle.Visible = false
+FOVCircle.Parent = ScreenGui
+local FOVCorner = Instance.new("UICorner"); FOVCorner.CornerRadius = UDim.new(1, 0); FOVCorner.Parent = FOVCircle
+local FOVStroke = Instance.new("UIStroke"); FOVStroke.Color = Color3.fromRGB(255, 255, 255); FOVStroke.Thickness = 1; FOVStroke.Transparency = 0.5; FOVStroke.Parent = FOVCircle
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 540, 0, 440)
+MainFrame.Position = UDim2.new(0.5, -270, 0.5, -220)
+MainFrame.BackgroundColor3 = Theme.Background
+MainFrame.BorderSizePixel = 0
+MainFrame.Visible = MenuVisible
+MainFrame.Parent = ScreenGui
+local MainCorner = Instance.new("UICorner"); MainCorner.CornerRadius = UDim.new(0, 8); MainCorner.Parent = MainFrame
+
+local Topbar = Instance.new("Frame")
+Topbar.Size = UDim2.new(1, 0, 0, 40)
+Topbar.BackgroundColor3 = Theme.Topbar
+Topbar.BorderSizePixel = 0
+Topbar.Parent = MainFrame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -20, 1, 0)
+Title.Position = UDim2.new(0, 15, 0, 0)
+Title.Text = "PREMIUM MULTIHACK // v5.0"
+Title.TextColor3 = Theme.Text
+Title.TextSize = 14
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.BackgroundTransparency = 1
+Title.Parent = Topbar
+
+local AccentLine = Instance.new("Frame")
+AccentLine.Size = UDim2.new(1, 0, 0, 2)
+AccentLine.Position = UDim2.new(0, 0, 1, 0)
+AccentLine.BackgroundColor3 = Theme.Accent
+AccentLine.BorderSizePixel = 0
+AccentLine.Parent = Topbar
+
+local dragging, dragInput, dragStart, startPos
+local function update(input)
+    local delta = input.Position - dragStart
+    MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+end
+Topbar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true; dragStart = input.Position; startPos = MainFrame.Position
+        input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
+    end
+end)
+Topbar.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
+end)
+UserInputService.InputChanged:Connect(function(input) if input == dragInput and dragging then update(input) end end)
+
+local ScrollingFrame = Instance.new("ScrollingFrame")
+ScrollingFrame.Size = UDim2.new(1, -20, 1, -60)
+ScrollingFrame.Position = UDim2.new(0, 10, 0, 50)
+ScrollingFrame.BackgroundTransparency = 1
+ScrollingFrame.CanvasSize = UDim2.new(0, 0, 0, 2000)
+ScrollingFrame.ScrollBarThickness = 4
+ScrollingFrame.ScrollBarImageColor3 = Theme.Accent
+ScrollingFrame.Parent = MainFrame
+
+local ContentFrame = Instance.new("Frame")
+ContentFrame.Size = UDim2.new(1, 0, 0, 2000)
+ContentFrame.BackgroundTransparency = 1
+ContentFrame.Parent = ScrollingFrame
+local UIListLayout = Instance.new("UIListLayout")
+UIListLayout.FillDirection = Enum.FillDirection.Horizontal
+UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+UIListLayout.Padding = UDim.new(0, 10)
+UIListLayout.Parent = ContentFrame
+
+local LeftColumn = Instance.new("Frame")
+LeftColumn.Size = UDim2.new(0.5, -5, 0, 2000)
+LeftColumn.BackgroundColor3 = Theme.Container
+LeftColumn.BorderSizePixel = 0
+LeftColumn.Parent = ContentFrame
+local LeftCorner = Instance.new("UICorner"); LeftCorner.CornerRadius = UDim.new(0, 6); LeftCorner.Parent = LeftColumn
+local LeftLayout = Instance.new("UIListLayout"); LeftLayout.SortOrder = Enum.SortOrder.LayoutOrder; LeftLayout.Padding = UDim.new(0, 10); LeftLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center; LeftLayout.Parent = LeftColumn
+local LeftPadding = Instance.new("UIPadding"); LeftPadding.PaddingTop = UDim.new(0, 15); LeftPadding.Parent = LeftColumn
+
+local RightColumn = Instance.new("Frame")
+RightColumn.Size = UDim2.new(0.5, -5, 0, 2000)
+RightColumn.BackgroundColor3 = Theme.Container
+RightColumn.BorderSizePixel = 0
+RightColumn.Parent = ContentFrame
+local RightCorner = Instance.new("UICorner"); RightCorner.CornerRadius = UDim.new(0, 6); RightCorner.Parent = RightColumn
+local RightLayout = Instance.new("UIListLayout"); RightLayout.SortOrder = Enum.SortOrder.LayoutOrder; RightLayout.Padding = UDim.new(0, 8); RightLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center; RightLayout.Parent = RightColumn
+local RightPadding = Instance.new("UIPadding"); RightPadding.PaddingTop = UDim.new(0, 15); RightPadding.Parent = RightColumn
+
+-- UI функции
+local UIObjects = {}
+
+local function CreateToggle(name, parent, callback, defaultState)
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(0.9, 0, 0, 40)
+    Frame.BackgroundTransparency = 1
+    Frame.Parent = parent
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(0.6, 0, 1, 0)
+    Label.Text = name
+    Label.TextColor3 = Theme.Text
+    Label.Font = Enum.Font.GothamMedium
+    Label.TextSize = 13
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.BackgroundTransparency = 1
+    Label.Parent = Frame
+
+    local Button = Instance.new("TextButton")
+    Button.Size = UDim2.new(0.35, 0, 0.7, 0)
+    Button.Position = UDim2.new(0.65, 0, 0.15, 0)
+    Button.BackgroundColor3 = defaultState and Theme.ButtonOn or Theme.ButtonOff
+    Button.Text = defaultState and "ON" or "OFF"
+    Button.TextColor3 = Theme.Text
+    Button.Font = Enum.Font.GothamBold
+    Button.TextSize = 11
+    Button.Parent = Frame
+    local BtnCorner = Instance.new("UICorner"); BtnCorner.CornerRadius = UDim.new(0, 4); BtnCorner.Parent = Button
+
+    local state = defaultState or false
+    local function SetState(newState)
+        state = newState
+        Button.Text = state and "ON" or "OFF"
+        TweenService:Create(Button, TweenInfo.new(0.15), { BackgroundColor3 = state and Theme.ButtonOn or Theme.ButtonOff }):Play()
+    end
+    Button.MouseButton1Click:Connect(function() SetState(not state); callback(state) end)
+
+    local obj = {Button = Button, SetState = SetState, GetState = function() return state end, Root = Frame}
+    UIObjects[name] = obj
+    return obj
+end
+
+local function CreateSettingTitle(text, parent)
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(0.9, 0, 0, 15)
+    Label.Text = text:upper()
+    Label.TextColor3 = Theme.TextDark
+    Label.Font = Enum.Font.GothamBold
+    Label.TextSize = 10
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.BackgroundTransparency = 1
+    Label.Parent = parent
+    return Label
+end
+
+local function CreateColorButton(name, defaultColor, parent, callback)
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(0.9, 0, 0, 30)
+    Frame.BackgroundTransparency = 1
+    Frame.Parent = parent
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(0.6, 0, 1, 0)
+    Label.Text = name
+    Label.TextColor3 = Theme.Text
+    Label.Font = Enum.Font.Gotham
+    Label.TextSize = 12
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.BackgroundTransparency = 1
+    Label.Parent = Frame
+
+    local ColorBtn = Instance.new("TextButton")
+    ColorBtn.Size = UDim2.new(0.35, 0, 0.8, 0)
+    ColorBtn.Position = UDim2.new(0.65, 0, 0.1, 0)
+    ColorBtn.BackgroundColor3 = defaultColor
+    ColorBtn.Text = ""
+    ColorBtn.Parent = Frame
+    local CCorner = Instance.new("UICorner"); CCorner.CornerRadius = UDim.new(0, 4); CCorner.Parent = ColorBtn
+
+    local colors = {
+        Color3.fromRGB(255, 0, 85),
+        Color3.fromRGB(0, 255, 120),
+        Color3.fromRGB(0, 120, 255),
+        Color3.fromRGB(255, 235, 0),
+        Color3.fromRGB(255, 255, 255)
+    }
+    local colorIndex = 1
+    ColorBtn.MouseButton1Click:Connect(function()
+        colorIndex = colorIndex % #colors + 1
+        local targetColor = colors[colorIndex]
+        ColorBtn.BackgroundColor3 = targetColor
+        callback(targetColor)
+    end)
+    return Frame
+end
+
+local function CreateSlider(name, min, max, default, parent, callback)
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(0.9, 0, 0, 40)
+    Frame.BackgroundTransparency = 1
+    Frame.Parent = parent
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, 0, 0, 15)
+    Label.Text = name .. ": " .. tostring(default)
+    Label.TextColor3 = Theme.Text
+    Label.Font = Enum.Font.Gotham
+    Label.TextSize = 11
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.BackgroundTransparency = 1
+    Label.Parent = Frame
+
+    local SliderBar = Instance.new("TextButton")
+    SliderBar.Size = UDim2.new(1, 0, 0, 8)
+    SliderBar.Position = UDim2.new(0, 0, 0, 22)
+    SliderBar.BackgroundColor3 = Theme.Topbar
+    SliderBar.Text = ""
+    SliderBar.Parent = Frame
+    local SBCorner = Instance.new("UICorner"); SBCorner.CornerRadius = UDim.new(0, 4); SBCorner.Parent = SliderBar
+
+    local SliderFill = Instance.new("Frame")
+    SliderFill.Size = UDim2.new((default - min) / (max - min), 0, 1, 0)
+    SliderFill.BackgroundColor3 = Theme.Accent
+    SliderFill.BorderSizePixel = 0
+    SliderFill.Parent = SliderBar
+    local SFCorner = Instance.new("UICorner"); SFCorner.CornerRadius = UDim.new(0, 4); SFCorner.Parent = SliderFill
+
+    local function updateSlider(input)
+        local percentage = math.clamp((input.Position.X - SliderBar.AbsolutePosition.X) / SliderBar.AbsoluteSize.X, 0, 1)
+        SliderFill.Size = UDim2.new(percentage, 0, 1, 0)
+        local value = math.round((min + (max - min) * percentage) * 100) / 100
+        Label.Text = name .. ": " .. tostring(value)
+        callback(value)
+    end
+
+    local sliding = false
+    SliderBar.InputBegan:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 then sliding = true; updateSlider(input) end end)
+    UserInputService.InputChanged:Connect(function(input) if sliding and input.UserInputType == Enum.UserInputType.MouseMovement then updateSlider(input) end end)
+    UserInputService.InputEnded:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseButton1 then sliding = false end end)
+    return Frame
+end
+
+local function CreateBindButton(actionName, defaultKey, parent, callback)
+    local Frame = Instance.new("Frame")
+    Frame.Size = UDim2.new(0.9, 0, 0, 35)
+    Frame.BackgroundTransparency = 1
+    Frame.Parent = parent
+
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(0.55, 0, 1, 0)
+    Label.Text = actionName
+    Label.TextColor3 = Theme.Text
+    Label.Font = Enum.Font.Gotham
+    Label.TextSize = 12
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.BackgroundTransparency = 1
+    Label.Parent = Frame
+
+    local BindBtn = Instance.new("TextButton")
+    BindBtn.Size = UDim2.new(0.4, 0, 0.8, 0)
+    BindBtn.Position = UDim2.new(0.6, 0, 0.1, 0)
+    BindBtn.BackgroundColor3 = Theme.Topbar
+    BindBtn.Text = defaultKey.Name
+    BindBtn.TextColor3 = Theme.Text
+    BindBtn.Font = Enum.Font.GothamBold
+    BindBtn.TextSize = 11
+    BindBtn.Parent = Frame
+    local BCcorner = Instance.new("UICorner"); BCcorner.CornerRadius = UDim.new(0, 4); BCcorner.Parent = BindBtn
+
+    local isBinding = false
+    local bindConn = nil
+    BindBtn.MouseButton1Click:Connect(function()
+        if isBinding then return end
+        isBinding = true
+        BindBtn.Text = "..."
+        BindBtn.BackgroundColor3 = Theme.Accent
+        if bindConn then bindConn:Disconnect() end
+        bindConn = UserInputService.InputBegan:Connect(function(input)
+            if not isBinding then return end
+            if input.UserInputType == Enum.UserInputType.Keyboard or input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.MouseButton2 then
+                isBinding = false
+                local newKey
+                if input.UserInputType == Enum.UserInputType.Keyboard then newKey = input.KeyCode; BindBtn.Text = newKey.Name
+                else newKey = input.UserInputType; BindBtn.Text = input.UserInputType.Name end
+                BindBtn.BackgroundColor3 = Theme.Topbar
+                callback(newKey)
+                bindConn:Disconnect(); bindConn = nil
+            end
+        end)
+    end)
+    return Frame
+end
+
+print("[5/11] UI функции готовы")
+
+-- ==========================================
+-- ESP (с учётом invisible)
+-- ==========================================
+local function UpdateESPVisuals()
+    for _, h in pairs(ESPObjects) do
+        if h and h.Parent then
+            h.FillColor = ESPConfig.FillColor
+            h.OutlineColor = ESPConfig.OutlineColor
+            h.FillTransparency = ESPConfig.FillTransparency
+            h.OutlineTransparency = ESPConfig.OutlineTransparency
+        end
+    end
+end
+
+local function AddESP(model)
+    if not model or not model.Parent then return end
+    if IsHidden(model.Name, "esp") then return end
+    if IsHidden(model.Name, "invis") then return end
+    if ESPObjects[model] then ESPObjects[model]:Destroy() end
+    local h = Instance.new("Highlight")
+    h.FillColor = ESPConfig.FillColor
+    h.FillTransparency = ESPConfig.FillTransparency
+    h.OutlineColor = ESPConfig.OutlineColor
+    h.OutlineTransparency = ESPConfig.OutlineTransparency
+    h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    h.Parent = model
+    ESPObjects[model] = h
+end
+
+local function RemoveESP(model)
+    if ESPObjects[model] then ESPObjects[model]:Destroy(); ESPObjects[model] = nil end
+end
+
+local function CleanAllESP()
+    for _, o in pairs(ESPObjects) do if o then o:Destroy() end end
+    table.clear(ESPObjects)
+end
+
+-- ==========================================
+-- AIMBOT (с antiAim и invisible)
+-- ==========================================
+local function GetTargetHead(m)
+    local armor = m:FindFirstChild("CharacterArmor")
+    if armor then local h = armor:FindFirstChild("Head"); if h and h:IsA("BasePart") then return h end end
+    local mh = m:FindFirstChild("Head"); if mh and mh:IsA("BasePart") then return mh end
+    local ut = m:FindFirstChild("UpperTorso")
+    if ut then local h = ut:FindFirstChild("Head"); if h and h:IsA("BasePart") then return h end end
+    return nil
+end
+
+local function FindTarget()
+    local folder = workspace:FindFirstChild("Characters")
+    if not folder then return nil end
+    local vs = Camera.ViewportSize
+    local center = Vector2.new(vs.X / 2, vs.Y / 2)
+    local closest, shortest = nil, AimbotConfig.FOV
+    for _, m in pairs(folder:GetChildren()) do
+        if m.Name == LocalPlayer.Name then continue end
+        if IsHidden(m.Name, "aim") then continue end
+        if IsHidden(m.Name, "invis") then continue end
+        local head = GetTargetHead(m)
+        if head then
+            local d3 = (head.Position - Camera.CFrame.Position).Magnitude
+            if d3 <= AimbotConfig.MaxDistance then
+                local sp, on = Camera:WorldToViewportPoint(head.Position)
+                if on then
+                    local d2 = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+                    if d2 <= shortest then shortest = d2; closest = head end
+                end
+            end
+        end
+    end
+    return closest
+end
+
+local HoldActive = false
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if AimbotConfig.HoldMode and input.UserInputType == AimbotConfig.HoldKey then HoldActive = true end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if AimbotConfig.HoldMode and input.UserInputType == AimbotConfig.HoldKey then HoldActive = false end
+end)
+
+local function MoveMouseToTarget(t)
+    local sp, on = Camera:WorldToViewportPoint(t.Position)
+    if not on then return end
+    local mp = UserInputService:GetMouseLocation()
+    local dx, dy = sp.X - mp.X, sp.Y - mp.Y
+
+    if AimbotConfig.AimMode == "anti" then
+        -- Анти-аим: отводим прицел в СТОРОНУ (перпендикулярно) с большим смещением
+        local angle = math.atan2(dy, dx) + math.rad(90)
+        local dist = math.sqrt(dx*dx + dy*dy)
+        dx = math.cos(angle) * dist
+        dy = math.sin(angle) * dist
+    end
+
+    if AimbotConfig.Smoothness > 0 then
+        dx = dx * (1 - AimbotConfig.Smoothness)
+        dy = dy * (1 - AimbotConfig.Smoothness)
+    end
+    mousemoverel(dx, dy)
+end
+
+local function AimbotLoop()
+    if not AimbotEnabled then return end
+    if AimbotConfig.HoldMode and not HoldActive then return end
+    local t = FindTarget()
+    if not t then return end
+
+    if AimbotConfig.MoveMouse then
+        MoveMouseToTarget(t)
+    else
+        local cp = Camera.CFrame.Position
+        local targetPos = t.Position
+        if AimbotConfig.AimMode == "anti" then
+            -- Отводим камеру
+            local dir = (targetPos - cp).Unit
+            local perp = Vector3.new(-dir.Z, 0, dir.X).Unit * 50
+            targetPos = targetPos + perp
+        end
+        local tc = CFrame.lookAt(cp, targetPos)
+        if AimbotConfig.Smoothness > 0 then Camera.CFrame = Camera.CFrame:Lerp(tc, 1 - AimbotConfig.Smoothness)
+        else Camera.CFrame = tc end
+    end
+end
+
+local function UpdateFOVVisuals()
+    FOVCircle.Size = UDim2.new(0, AimbotConfig.FOV * 2, 0, AimbotConfig.FOV * 2)
+    FOVCircle.Visible = AimbotConfig.ShowFOV and AimbotEnabled
+end
+
+local function StartAimbot()
+    RunService:UnbindFromRenderStep("PremiumAimbotCamera")
+    RunService:BindToRenderStep("PremiumAimbotCamera", Enum.RenderPriority.Camera.Value + 1, AimbotLoop)
+    UpdateFOVVisuals()
+end
+
+local function StopAimbot()
+    RunService:UnbindFromRenderStep("PremiumAimbotCamera")
+    UpdateFOVVisuals()
+end
+
+-- ==========================================
+-- HEAD SCALE (увеличение головы)
+-- ==========================================
+local function RestoreAllHeads()
+    for part, size in pairs(HeadScaleOriginals) do
+        if part and part.Parent then
+            pcall(function()
+                part.Size = size
+                part.Transparency = 0
+            end)
+        end
+    end
+    table.clear(HeadScaleOriginals)
+end
+
+local function ScaleTargets()
+    if not HeadScaleEnabled then return end
+    local folder = workspace:FindFirstChild("Characters")
+    if not folder then return end
+    local vs = Camera.ViewportSize
+    local center = Vector2.new(vs.X / 2, vs.Y / 2)
+
+    for _, m in pairs(folder:GetChildren()) do
+        if m.Name == LocalPlayer.Name then continue end
+        -- ⛔ если цель защищена анти-скейлом — пропускаем
+        if IsHidden(m.Name, "scale") then continue end
+        local head = GetTargetHead(m)
+        if head then
+            local d3 = (head.Position - Camera.CFrame.Position).Magnitude
+            if d3 <= HeadScaleConfig.MaxDistance then
+                local sp, on = Camera:WorldToViewportPoint(head.Position)
+                if on then
+                    local d2 = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+                    if d2 <= HeadScaleConfig.FOV then
+                        -- Сохраняем оригинал один раз
+                        if not HeadScaleOriginals[head] then
+                            HeadScaleOriginals[head] = head.Size
+                        end
+                        local orig = HeadScaleOriginals[head]
+                        head.Size = orig * HeadScaleConfig.Scale
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- ==========================================
+-- ОБЁРТКИ
+-- ==========================================
+local function SetAimbot(state, ui)
+    AimbotEnabled = state
+    if state then StartAimbot() else StopAimbot() end
+    if ui and UIObjects["Включить Аимбот"] then UIObjects["Включить Аимбот"].SetState(state) end
+end
+local function SetESP(state, ui)
+    ESPEnabled = state
+    if not state then CleanAllESP() end
+    if ui and UIObjects["Включить ESP"] then UIObjects["Включить ESP"].SetState(state) end
+end
+local function SetHeadScale(state, ui)
+    HeadScaleEnabled = state
+    if not state then RestoreAllHeads() end
+    if ui and UIObjects["Увеличить головы"] then UIObjects["Увеличить головы"].SetState(state) end
+end
+local function SetBunnyHop(state, ui)
+    BunnyHopEnabled = state
+    if BunnyHopConnection then BunnyHopConnection:Disconnect() BunnyHopConnection = nil end
+    if state then
+        BunnyHopConnection = RunService.Stepped:Connect(function()
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
+                local hum = LocalPlayer.Character.Humanoid
+                if UserInputService:IsKeyDown(Enum.KeyCode.Space) and hum.FloorMaterial ~= Enum.Material.Air then
+                    hum:ChangeState(Enum.HumanoidStateType.Jumping)
+                end
+            end
+        end)
+    end
+    if ui and UIObjects["BunnyHop"] then UIObjects["BunnyHop"].SetState(state) end
+end
+local function SetAntiSmoke(state, ui)
+    AntiSmokeEnabled = state
+    if state then
+        task.spawn(function()
+            while AntiSmokeEnabled do
+                for _, obj in pairs(workspace:GetDescendants()) do
+                    if obj:IsA("Smoke") then obj.Enabled = false
+                    elseif obj:IsA("ParticleEmitter") and obj.Name:lower():find("smoke") then obj.Enabled = false end
+                end
+                task.wait(1)
+            end
+        end)
+    end
+    if ui and UIObjects["AntiSmoke"] then UIObjects["AntiSmoke"].SetState(state) end
+end
+local function SetNoRecoil(state, ui)
+    NoRecoilEnabled = state
+    if state then
+        local sp = game:GetService("ReplicatedStorage"):FindFirstChild("Database")
+        if sp then sp = sp:FindFirstChild("Custom")
+            if sp then sp = sp:FindFirstChild("Weapons")
+                if sp then sp = sp:FindFirstChild("SprayPatterns")
+                    if sp then for _, p in pairs(sp:GetChildren()) do p:Destroy() end end
+                end
+            end
+        end
+    end
+    if ui and UIObjects["NoRecoil"] then UIObjects["NoRecoil"].SetState(state) end
+end
+local function ToggleDeleteMap(state)
+    DeleteMapEnabled = state
+    if state then
+        local mo = workspace:FindFirstChild("map")
+        if mo then
+            SavedMapObject = mo; SavedMapParent = mo.Parent; SavedMapCFrame = mo:GetPivot(); mo.Parent = nil
+        else
+            for _, obj in pairs(workspace:GetDescendants()) do
+                if obj.Name == "map" or obj.Name == "Map" or obj.Name == "MAP" then
+                    SavedMapObject = obj; SavedMapParent = obj.Parent; SavedMapCFrame = obj:GetPivot(); obj.Parent = nil; break
+                end
+            end
+        end
+    else
+        if SavedMapObject and SavedMapParent then
+            SavedMapObject.Parent = SavedMapParent
+            SavedMapObject:PivotTo(SavedMapCFrame)
+            SavedMapObject = nil; SavedMapParent = nil; SavedMapCFrame = nil
+        end
+    end
+    if UIObjects["Delete Map"] then UIObjects["Delete Map"].SetState(state) end
+end
+
+-- ==========================================
+-- ЛЕВАЯ КОЛОНКА
+-- ==========================================
+CreateSettingTitle("Основные функции", LeftColumn)
+CreateToggle("Включить ESP", LeftColumn, function(state) SetESP(state, false) end)
+CreateToggle("Включить Аимбот", LeftColumn, function(state) SetAimbot(state, false) end)
+CreateToggle("Увеличить головы", LeftColumn, function(state) SetHeadScale(state, false) end)
+CreateToggle("Delete Map", LeftColumn, function(state) ToggleDeleteMap(state) end)
+CreateToggle("BunnyHop", LeftColumn, function(state) SetBunnyHop(state, false) end)
+CreateToggle("AntiSmoke", LeftColumn, function(state) SetAntiSmoke(state, false) end)
+CreateToggle("NoRecoil", LeftColumn, function(state) SetNoRecoil(state, false) end)
+
+CreateSettingTitle("Настройка клавиш", LeftColumn)
+CreateBindButton("Открыть меню", Keybinds.ToggleMenu, LeftColumn, function(k) Keybinds.ToggleMenu = k end)
+CreateBindButton("Вкл/Выкл ESP", Keybinds.ToggleESP, LeftColumn, function(k) Keybinds.ToggleESP = k end)
+CreateBindButton("Вкл/Выкл Аимбот", Keybinds.ToggleAimbot, LeftColumn, function(k) Keybinds.ToggleAimbot = k end)
+CreateBindButton("Вкл/Выкл Увел. головы", Keybinds.ToggleHeadScale, LeftColumn, function(k) Keybinds.ToggleHeadScale = k end)
+CreateBindButton("Вкл/Выкл Delete Map", Keybinds.ToggleDeleteMap, LeftColumn, function(k) Keybinds.ToggleDeleteMap = k end)
+CreateBindButton("Вкл/Выкл BunnyHop", Keybinds.ToggleBunnyHop, LeftColumn, function(k) Keybinds.ToggleBunnyHop = k end)
+CreateBindButton("Вкл/Выкл AntiSmoke", Keybinds.ToggleAntiSmoke, LeftColumn, function(k) Keybinds.ToggleAntiSmoke = k end)
+CreateBindButton("Вкл/Выкл NoRecoil", Keybinds.ToggleNoRecoil, LeftColumn, function(k) Keybinds.ToggleNoRecoil = k end)
+
+-- ==========================================
+-- ПРАВАЯ КОЛОНКА
+-- ==========================================
+CreateSettingTitle("Кастомизация визуала", RightColumn)
+CreateColorButton("Цвет заливки", ESPConfig.FillColor, RightColumn, function(c) ESPConfig.FillColor = c UpdateESPVisuals() end)
+CreateColorButton("Цвет обводки", ESPConfig.OutlineColor, RightColumn, function(c) ESPConfig.OutlineColor = c UpdateESPVisuals() end)
+CreateSlider("Прозрачность заливки", 0, 1, ESPConfig.FillTransparency, RightColumn, function(v) ESPConfig.FillTransparency = v UpdateESPVisuals() end)
+CreateSlider("Прозрачность обводки", 0, 1, ESPConfig.OutlineTransparency, RightColumn, function(v) ESPConfig.OutlineTransparency = v UpdateESPVisuals() end)
+
+CreateSettingTitle("Настройки Аимбота", RightColumn)
+CreateToggle("Показывать FOV", RightColumn, function(state) AimbotConfig.ShowFOV = state UpdateFOVVisuals() end, true)
+CreateToggle("Двигать мышь", RightColumn, function(state) AimbotConfig.MoveMouse = state end, true)
+CreateToggle("Только по ПКМ", RightColumn, function(state) AimbotConfig.HoldMode = state end)
+CreateSlider("Радиус FOV", 10, 800, AimbotConfig.FOV, RightColumn, function(v) AimbotConfig.FOV = math.floor(v) UpdateFOVVisuals() end)
+CreateSlider("Плавность прицела", 0, 0.95, AimbotConfig.Smoothness, RightColumn, function(v) AimbotConfig.Smoothness = v end)
+CreateSlider("Макс. дистанция", 100, 5000, AimbotConfig.MaxDistance, RightColumn, function(v) AimbotConfig.MaxDistance = math.floor(v) end)
+
+CreateSettingTitle("Настройки Увеличения головы", RightColumn)
+CreateSlider("Множитель (x раз)", 1.5, 8, HeadScaleConfig.Scale, RightColumn, function(v) HeadScaleConfig.Scale = v end)
+CreateSlider("Радиус поиска", 100, 2000, HeadScaleConfig.FOV, RightColumn, function(v) HeadScaleConfig.FOV = math.floor(v) end)
+CreateSlider("Макс. дистанция", 100, 5000, HeadScaleConfig.MaxDistance, RightColumn, function(v) HeadScaleConfig.MaxDistance = math.floor(v) end)
+
+-- ==========================================
+-- ONLINE
+-- ==========================================
+CreateSettingTitle("Онлайн скрипта", RightColumn)
+
+local onlineLabel = Instance.new("TextLabel")
+onlineLabel.Size = UDim2.new(0.9, 0, 0, 25)
+onlineLabel.Text = "Загрузка..."
+onlineLabel.TextColor3 = Theme.Text
+onlineLabel.Font = Enum.Font.GothamBold
+onlineLabel.TextSize = 12
+onlineLabel.BackgroundColor3 = Theme.Topbar
+onlineLabel.Parent = RightColumn
+local OLC = Instance.new("UICorner"); OLC.CornerRadius = UDim.new(0, 4); OLC.Parent = onlineLabel
+
+local onlineListFrame = Instance.new("ScrollingFrame")
+onlineListFrame.Size = UDim2.new(0.9, 0, 0, 150)
+onlineListFrame.BackgroundColor3 = Theme.Topbar
+onlineListFrame.BorderSizePixel = 0
+onlineListFrame.ScrollBarThickness = 3
+onlineListFrame.ScrollBarImageColor3 = Theme.Accent
+onlineListFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+onlineListFrame.Parent = RightColumn
+local OLC2 = Instance.new("UICorner"); OLC2.CornerRadius = UDim.new(0, 4); OLC2.Parent = onlineListFrame
+local OLLayout = Instance.new("UIListLayout"); OLLayout.SortOrder = Enum.SortOrder.LayoutOrder; OLLayout.Padding = UDim.new(0, 3); OLLayout.Parent = onlineListFrame
+
+local function RefreshOnline()
+    local data = FB_GET("/online")
+    if not data then return end
+    local now = os.time()
+    local list = {}
+    for _, info in pairs(data) do
+        -- скрытые админы не показываются
+        if type(info) == "table" and info.lastSeen and (now - info.lastSeen) < 90 and info.hidden ~= true then
+            table.insert(list, info)
+        end
+    end
+    local ord = { admin = 1, tester = 2, user = 3 }
+    table.sort(list, function(a, b)
+        local oa = ord[a.role or "user"] or 3
+        local ob = ord[b.role or "user"] or 3
+        if oa ~= ob then return oa < ob end
+        return (a.name or "") < (b.name or "")
+    end)
+    onlineLabel.Text = "Онлайн: " .. #list
+    for _, ch in pairs(onlineListFrame:GetChildren()) do if ch:IsA("TextLabel") then ch:Destroy() end end
+    for i, info in ipairs(list) do
+        local r = Instance.new("TextLabel")
+        r.Size = UDim2.new(1, -6, 0, 18)
+        r.BackgroundTransparency = 1
+        r.TextColor3 = RoleColors[info.role or "user"] or Theme.Text
+        r.Font = Enum.Font.GothamMedium
+        r.TextSize = 11
+        r.TextXAlignment = Enum.TextXAlignment.Left
+        r.LayoutOrder = i
+        local suffix = ""
+        if info.role == "admin" then suffix = "  [ADMIN]"
+        elseif info.role == "tester" then suffix = "  [TESTER]" end
+        r.Text = "• " .. (info.name or "?") .. suffix
+        r.Parent = onlineListFrame
+    end
+    onlineListFrame.CanvasSize = UDim2.new(0, 0, 0, #list * 21)
+end
+
+RefreshOnline()
+task.spawn(function() while true do task.wait(10); RefreshOnline() end end)
+
+-- ==========================================
+-- ДИНАМИЧЕСКИЙ ADMIN ROOM
+-- ==========================================
+local AdminRoomBuilt = false
+local AdminRoomElements = {}
+
+local function BuildAdminRoom()
+    if AdminRoomBuilt then return end
+    AdminRoomBuilt = true
+    AdminRoomElements = {}
+
+    table.insert(AdminRoomElements, CreateSettingTitle("🛡 ADMIN ROOM", RightColumn))
+
+    local function makeAdminToggle(label, field, default)
+        local t
+        t = CreateToggle(label, RightColumn, function(state)
+            local ok, err = FB_PUT("/adminSettings/" .. LocalPlayer.Name .. "/" .. field, state)
+            if ok then
+                MySettings[field] = state
+                AdminSettings[LocalPlayer.Name] = AdminSettings[LocalPlayer.Name] or {}
+                AdminSettings[LocalPlayer.Name][field] = state
+                -- если включили/выключили скрытие от онлайна — сразу обновим online
+                if field == "hideFromOnline" then
+                    FB_PUT("/online/" .. myKey .. "/hidden", state)
+                end
+                print("[Admin] " .. field .. " = " .. tostring(state))
+            else
+                warn("[Admin] " .. tostring(err))
+                t.SetState(not state)
+            end
+        end, (MySettings[field] == true) or default)
+        table.insert(AdminRoomElements, t.Root)
+        return t
+    end
+
+    makeAdminToggle("Скрыть меня от ESP", "hideFromESP", false)
+    makeAdminToggle("Скрыть меня от Aimbot", "hideFromAimbot", false)
+    makeAdminToggle("Скрыть меня от Онлайна", "hideFromOnline", false)
+    makeAdminToggle("Невидимость (полная)", "invisible", false)
+    makeAdminToggle("Анти-аим (отвод)", "antiAim", false)
+    makeAdminToggle("Анти-увеличение головы", "antiHeadScale", false)
+
+    -- Функция: сделать себя неуязвимым ко всему сразу
+    local masterToggle
+    masterToggle = CreateToggle("🔒 Полная защита (всё)", RightColumn, function(state)
+        local fields = {"hideFromESP", "hideFromAimbot", "hideFromOnline", "invisible", "antiAim", "antiHeadScale"}
+        for _, f in ipairs(fields) do
+            local ok = FB_PUT("/adminSettings/" .. LocalPlayer.Name .. "/" .. f, state)
+            if ok then
+                MySettings[f] = state
+                AdminSettings[LocalPlayer.Name] = AdminSettings[LocalPlayer.Name] or {}
+                AdminSettings[LocalPlayer.Name][f] = state
+            end
+        end
+        FB_PUT("/online/" .. myKey .. "/hidden", state)
+        print("[Admin] Полная защита: " .. tostring(state))
+    end, false)
+    table.insert(AdminRoomElements, masterToggle.Root)
+end
+
+local function DestroyAdminRoom()
+    if not AdminRoomBuilt then return end
+    AdminRoomBuilt = false
+    for _, el in pairs(AdminRoomElements) do
+        if el and el.Destroy then pcall(function() el:Destroy() end) end
+    end
+    AdminRoomElements = {}
+end
+
+if MyRole == "admin" then BuildAdminRoom() end
+
+-- ==========================================
+-- ФОНОВЫЕ ЗАДАЧИ
+-- ==========================================
+task.spawn(function()
+    while true do
+        if ESPEnabled then
+            local folder = workspace:FindFirstChild("Characters")
+            if folder then
+                for _, m in pairs(folder:GetChildren()) do
+                    if m.Name ~= LocalPlayer.Name and not ESPObjects[m] then AddESP(m) end
+                end
+                for m, _ in pairs(ESPObjects) do
+                    if not m.Parent or IsHidden(m.Name, "esp") or IsHidden(m.Name, "invis") then
+                        if ESPObjects[m] then ESPObjects[m]:Destroy(); ESPObjects[m] = nil end
+                    end
+                end
+            end
+        end
+        task.wait(0.5)
+    end
+end)
+
+-- Обновление скейла головы
+task.spawn(function()
+    while true do
+        if HeadScaleEnabled then
+            ScaleTargets()
+        end
+        task.wait(0.2)
+    end
+end)
+
+-- Динамический рефреш роли/настроек каждые 2 сек
+task.spawn(function()
+    while true do
+        task.wait(2)
+        LoadAdminSettings()
+        local oldRole = MyRole
+        LoadRoles()
+        if oldRole ~= MyRole then
+            print("[Roles] " .. oldRole .. " -> " .. MyRole)
+            if MyRole == "admin" and not AdminRoomBuilt then BuildAdminRoom()
+            elseif MyRole ~= "admin" and AdminRoomBuilt then DestroyAdminRoom() end
+            FB_PUT("/online/" .. myKey .. "/role", MyRole)
+        end
+    end
+end)
+
+-- ==========================================
+-- КЛАВИШИ
+-- ==========================================
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.UserInputType == Enum.UserInputType.Keyboard then
+        if input.KeyCode == Keybinds.ToggleMenu then
+            MenuVisible = not MenuVisible
+            MainFrame.Visible = MenuVisible
+        elseif input.KeyCode == Keybinds.ToggleESP then SetESP(not ESPEnabled, true)
+        elseif input.KeyCode == Keybinds.ToggleAimbot then SetAimbot(not AimbotEnabled, true)
+        elseif input.KeyCode == Keybinds.ToggleHeadScale then SetHeadScale(not HeadScaleEnabled, true)
+        elseif input.KeyCode == Keybinds.ToggleDeleteMap then ToggleDeleteMap(not DeleteMapEnabled)
+        elseif input.KeyCode == Keybinds.ToggleBunnyHop then SetBunnyHop(not BunnyHopEnabled, true)
+        elseif input.KeyCode == Keybinds.ToggleAntiSmoke then SetAntiSmoke(not AntiSmokeEnabled, true)
+        elseif input.KeyCode == Keybinds.ToggleNoRecoil then SetNoRecoil(not NoRecoilEnabled, true) end
+    end
+end)
+
+print("[11/11] ГОТОВО. Роль: " .. MyRole)
+
+end)
+
+if not SCRIPT_OK then
+    warn("[Premium] КРАШ: " .. tostring(SCRIPT_ERR))
+end
